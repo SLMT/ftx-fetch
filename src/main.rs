@@ -1,17 +1,22 @@
-use std::sync::mpsc::{channel, Receiver, Sender};
 
 use chrono::prelude::*;
 use clap::{Parser, Subcommand};
+use csv::Writer;
 use dotenv::dotenv;
 use ftx::{
     options::Options,
-    rest::{Candle, Future, GetFutures, GetHistoricalPrices, Rest},
+    rest::{Candle, GetFutures, GetHistoricalPrices, Rest},
 };
+use log::info;
 use prettytable::{cell, row, Table};
 use rust_decimal_macros::dec;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep_until};
 
 type Ftx = Rest;
+type StdDuration = std::time::Duration;
+type ChDuration = chrono::Duration;
+
+const REQUEST_INTERVAL: StdDuration = StdDuration::from_millis(20);
 
 #[derive(Parser, Debug)]
 #[clap(name = "FTX Price Fetcher")]
@@ -51,6 +56,10 @@ async fn main() {
     // Read '.env' file
     dotenv().ok();
 
+    // Init logging
+    set_logger_level();
+    pretty_env_logger::init();
+
     // Read parameters
     let args = Args::parse();
 
@@ -65,16 +74,21 @@ async fn main() {
             end_date,
             resolution,
         } => {
-            let start_time: DateTime<Utc> = parse_date(&start_date).and_hms(0, 0, 0).into();
-            let end_time: DateTime<Utc> = if let Some(end_date) = end_date {
+            let start_time: DateTime<Local> = parse_date(&start_date).and_hms(0, 0, 0).into();
+            let end_time: DateTime<Local> = if let Some(end_date) = end_date {
                 parse_date(&end_date).and_hms(23, 59, 59).into()
             } else {
-                Utc::now()
+                Local::now()
             };
-
-            dbg!(start_time);
-            dbg!(end_time);
+            download(ftx, market_name, start_time, end_time, resolution).await;
         }
+    }
+}
+
+fn set_logger_level() {
+    match std::env::var("RUST_LOG") {
+        Ok(_) => {},
+        Err(_) => std::env::set_var("RUST_LOG", "INFO"),
     }
 }
 
@@ -129,50 +143,86 @@ async fn download(
     end_time: DateTime<Local>,
     resolution: u32,
 ) {
-    // Create a shared data structure to store the results
-    let (tx, rx): (Sender<Vec<Candle>>, Receiver<Vec<Candle>>) = channel();
+    let mut all_candles: Vec<Candle> = Vec::new();
 
-    // TODO: Issue requests to fetch historical prices
-    let execute_time = Instant::now();
-    let task = tokio::time::timeout_at(
-        execute_time.clone(),
-        fetch_historical_price(
-            ftx,
-            market_name,
-            start_time,
-            end_time,
-            resolution,
-            execute_time,
-            tx,
-        ),
-    );
-    tokio::spawn(task);
+    // Issue requests to fetch historical prices
+    let mut wakeup_time = Instant::now();
+    let mut iter_count = 0;
+    let mut next_end_time = end_time;
+    loop {
+        // Wait for a while to avoid reach rate limit
+        sleep_until(wakeup_time).await;
 
-    // TODO: Save the results to a CSV file
+        // Fetch the data
+        let mut candles: Vec<Candle> = ftx
+            .request(GetHistoricalPrices {
+                market_name: market_name.clone(),
+                resolution,
+                limit: None,
+                start_time: Some(start_time.with_timezone(&Utc)),
+                end_time: Some(next_end_time.with_timezone(&Utc)),
+            })
+            .await
+            .unwrap_or_default();
+        
+        // Stops when getting an empty result
+        if candles.is_empty() {
+            break;
+        }
 
-    // unimplemented!();
+        // Prepare for the next request
+        let current_start_time = candles.first().unwrap().start_time
+            .with_timezone(&Local);
+        next_end_time = current_start_time - ChDuration::seconds(1);
+        wakeup_time += REQUEST_INTERVAL;
+
+        // Save the result
+        all_candles.append(&mut candles);
+
+        // Report
+        iter_count += 1;
+        if iter_count % 10 == 0 {
+            info!(
+                "Data points from {} to {} ({} points) are downloaded.",
+                current_start_time.format("%Y-%m-%d %H:%M:%S"),
+                end_time.format("%Y-%m-%d %H:%M:%S"),
+                all_candles.len()
+            );
+        }
+    }
+
+    info!("Downloading finished. {} data points are downloaded.", all_candles.len());
+    
+    // Sort the candles by time
+    all_candles.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
+
+    // Save the results to a CSV file
+    let real_start_time = all_candles.first().unwrap().start_time.with_timezone(&Local);
+    let real_end_time = all_candles.last().unwrap().start_time.with_timezone(&Local);
+    let filename = format!("{}-{}-{}.csv", market_name.to_lowercase(),
+        real_start_time.format("%Y-%m-%d"), real_end_time.format("%Y-%m-%d"));
+    info!("Saving the data to '{}'...", filename);
+    save_to_csv(all_candles, &filename).unwrap();
+
+    info!("The data are saved to '{}'.", filename);
 }
 
-async fn fetch_historical_price(
-    ftx: Ftx,
-    market_name: String,
-    start_time: DateTime<Local>,
-    end_time: DateTime<Local>,
-    resolution: u32,
-    execute_time: Instant,
-    out_channel: Sender<Vec<Candle>>,
-) {
-    let mut candles = ftx
-        .request(GetHistoricalPrices {
-            market_name,
-            resolution,
-            limit: None,
-            start_time: Some(start_time.with_timezone(&Utc)),
-            end_time: Some(end_time.with_timezone(&Utc)),
-        })
-        .await
-        .unwrap();
+fn save_to_csv(candles: Vec<Candle>, file_name: &str) -> csv::Result<()> {
+    let mut writer = Writer::from_path(file_name).unwrap();
+    writer.write_record(&["Start Time (Local)", "Open", "Close", "Low", "High", "Volume"])?;
 
-    println!("{:?}", candles.first());
-    println!("{:?}", candles.last());
+    for candle in candles {
+        writer.write_record(&[
+            candle.start_time.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S").to_string(),
+            format!("{:.4}", candle.open),
+            format!("{:.4}", candle.close),
+            format!("{:.4}", candle.low),
+            format!("{:.4}", candle.high),
+            format!("{:.4}", candle.volume),
+        ])?;
+    }
+    writer.flush()?;
+
+    Ok(())
 }

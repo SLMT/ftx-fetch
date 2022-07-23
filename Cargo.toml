@@ -14,3 +14,6 @@ clap = { version = "3.2.14", features = ["derive"] }
 prettytable-rs = "0.8"
 rust_decimal = "1.25"
 rust_decimal_macros = "1.25"
+log = "0.4"
+pretty_env_logger = "0.4"
+csv = "1.1"

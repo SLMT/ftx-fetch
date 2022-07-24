@@ -1,4 +1,3 @@
-
 use chrono::prelude::*;
 use clap::{Parser, Subcommand};
 use csv::Writer;
@@ -10,7 +9,7 @@ use ftx::{
 use log::info;
 use prettytable::{cell, row, Table};
 use rust_decimal_macros::dec;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{sleep_until, Instant};
 
 type Ftx = Rest;
 type StdDuration = std::time::Duration;
@@ -74,9 +73,9 @@ async fn main() {
             end_date,
             resolution,
         } => {
-            let start_time: DateTime<Local> = parse_date(&start_date).and_hms(0, 0, 0).into();
+            let start_time: DateTime<Local> = parse_date(&start_date).and_hms(0, 0, 0);
             let end_time: DateTime<Local> = if let Some(end_date) = end_date {
-                parse_date(&end_date).and_hms(23, 59, 59).into()
+                parse_date(&end_date).and_hms(23, 59, 59)
             } else {
                 Local::now()
             };
@@ -87,7 +86,7 @@ async fn main() {
 
 fn set_logger_level() {
     match std::env::var("RUST_LOG") {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(_) => std::env::set_var("RUST_LOG", "INFO"),
     }
 }
@@ -164,15 +163,14 @@ async fn download(
             })
             .await
             .unwrap_or_default();
-        
+
         // Stops when getting an empty result
         if candles.is_empty() {
             break;
         }
 
         // Prepare for the next request
-        let current_start_time = candles.first().unwrap().start_time
-            .with_timezone(&Local);
+        let current_start_time = candles.first().unwrap().start_time.with_timezone(&Local);
         next_end_time = current_start_time - ChDuration::seconds(1);
         wakeup_time += REQUEST_INTERVAL;
 
@@ -191,16 +189,27 @@ async fn download(
         }
     }
 
-    info!("Downloading finished. {} data points are downloaded.", all_candles.len());
-    
+    info!(
+        "Downloading finished. {} data points are downloaded.",
+        all_candles.len()
+    );
+
     // Sort the candles by time
     all_candles.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
 
     // Save the results to a CSV file
-    let real_start_time = all_candles.first().unwrap().start_time.with_timezone(&Local);
+    let real_start_time = all_candles
+        .first()
+        .unwrap()
+        .start_time
+        .with_timezone(&Local);
     let real_end_time = all_candles.last().unwrap().start_time.with_timezone(&Local);
-    let filename = format!("{}-{}-{}.csv", market_name.to_lowercase(),
-        real_start_time.format("%Y-%m-%d"), real_end_time.format("%Y-%m-%d"));
+    let filename = format!(
+        "{}-{}-{}.csv",
+        market_name.to_lowercase(),
+        real_start_time.format("%Y-%m-%d"),
+        real_end_time.format("%Y-%m-%d")
+    );
     info!("Saving the data to '{}'...", filename);
     save_to_csv(all_candles, &filename).unwrap();
 
@@ -209,12 +218,22 @@ async fn download(
 
 fn save_to_csv(candles: Vec<Candle>, file_name: &str) -> csv::Result<()> {
     let mut writer = Writer::from_path(file_name).unwrap();
-    writer.write_record(&["Start Time (Local)", "Open", "Close", "Low", "High", "Volume"])?;
+    writer.write_record(&[
+        "Start Time (Local)",
+        "Open",
+        "Close",
+        "Low",
+        "High",
+        "Volume",
+    ])?;
 
     for candle in candles {
         writer.write_record(&[
-            candle.start_time.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S").to_string(),
+            candle
+                .start_time
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             format!("{:.4}", candle.open),
             format!("{:.4}", candle.close),
             format!("{:.4}", candle.low),

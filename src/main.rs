@@ -78,6 +78,7 @@ async fn main() {
         subaccount: None,
     });
 
+    // Execute sub commands
     if let Err(error) = match args.command {
         Commands::Tops { count } => tops(ftx, count).await,
         Commands::Download {

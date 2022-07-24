@@ -6,7 +6,7 @@ use ftx::{
     options::Options,
     rest::{Candle, GetFutures, GetHistoricalPrices, Rest},
 };
-use log::info;
+use log::{error, info};
 use prettytable::{cell, row, Table};
 use rust_decimal_macros::dec;
 use tokio::time::{sleep_until, Instant};
@@ -50,6 +50,18 @@ enum Commands {
     },
 }
 
+#[derive(thiserror::Error, Debug)]
+enum FfError {
+    #[error("FTX error: {0}")]
+    Ftx(#[from] ftx::rest::Error),
+    #[error("CSV error: {0}")]
+    Csv(#[from] csv::Error),
+    #[error("Chrono parsing error: {0}")]
+    ChronoParse(#[from] chrono::format::ParseError),
+}
+
+type FfResult<T> = Result<T, FfError>;
+
 #[tokio::main]
 async fn main() {
     // Read '.env' file
@@ -65,22 +77,16 @@ async fn main() {
     // Create a FTX connector
     let ftx = Ftx::new(Options::from_env());
 
-    match args.command {
+    if let Err(error) = match args.command {
         Commands::Tops { count } => tops(ftx, count).await,
         Commands::Download {
             market_name,
             start_date,
             end_date,
             resolution,
-        } => {
-            let start_time: DateTime<Local> = parse_date(&start_date).and_hms(0, 0, 0);
-            let end_time: DateTime<Local> = if let Some(end_date) = end_date {
-                parse_date(&end_date).and_hms(23, 59, 59)
-            } else {
-                Local::now()
-            };
-            download(ftx, market_name, start_time, end_time, resolution).await;
-        }
+        } => download(ftx, market_name, start_date, end_date, resolution).await,
+    } {
+        error!("{}", error.to_string());
     }
 }
 
@@ -91,14 +97,14 @@ fn set_logger_level() {
     }
 }
 
-fn parse_date(date_str: &str) -> Date<Local> {
-    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
-    Local.ymd(date.year(), date.month(), date.day())
+fn parse_date(date_str: &str) -> FfResult<Date<Local>> {
+    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
+    Ok(Local.ymd(date.year(), date.month(), date.day()))
 }
 
-async fn tops(ftx: Ftx, count: usize) {
+async fn tops(ftx: Ftx, count: usize) -> FfResult<()> {
     // Fetch futures and sort by volume (USD)
-    let mut futures = ftx.request(GetFutures {}).await.unwrap();
+    let mut futures = ftx.request(GetFutures {}).await?;
     futures.sort_by(|a, b| {
         a.volume_usd24h
             .unwrap()
@@ -133,16 +139,26 @@ async fn tops(ftx: Ftx, count: usize) {
 
     // Print the result
     table.printstd();
+
+    Ok(())
 }
 
 async fn download(
     ftx: Ftx,
     market_name: String,
-    start_time: DateTime<Local>,
-    end_time: DateTime<Local>,
+    start_date: String,
+    end_date: Option<String>,
     resolution: u32,
-) {
+) -> FfResult<()> {
     let mut all_candles: Vec<Candle> = Vec::new();
+
+    // Convert the date string to DateTime
+    let start_time: DateTime<Local> = parse_date(&start_date)?.and_hms(0, 0, 0);
+    let end_time: DateTime<Local> = if let Some(end_date) = end_date {
+        parse_date(&end_date)?.and_hms(23, 59, 59)
+    } else {
+        Local::now()
+    };
 
     // Issue requests to fetch historical prices
     let mut wakeup_time = Instant::now();
@@ -161,8 +177,7 @@ async fn download(
                 start_time: Some(start_time.with_timezone(&Utc)),
                 end_time: Some(next_end_time.with_timezone(&Utc)),
             })
-            .await
-            .unwrap_or_default();
+            .await?;
 
         // Stops when getting an empty result
         if candles.is_empty() {
@@ -211,13 +226,15 @@ async fn download(
         real_end_time.format("%Y-%m-%d")
     );
     info!("Saving the data to '{}'...", filename);
-    save_to_csv(all_candles, &filename).unwrap();
+    save_to_csv(all_candles, &filename)?;
 
     info!("The data are saved to '{}'.", filename);
+
+    Ok(())
 }
 
 fn save_to_csv(candles: Vec<Candle>, file_name: &str) -> csv::Result<()> {
-    let mut writer = Writer::from_path(file_name).unwrap();
+    let mut writer = Writer::from_path(file_name)?;
     writer.write_record(&[
         "Start Time (Local)",
         "Open",

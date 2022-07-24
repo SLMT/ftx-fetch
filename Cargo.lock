@@ -414,6 +414,7 @@ dependencies = [
  "prettytable-rs",
  "rust_decimal",
  "rust_decimal_macros",
+ "thiserror",
  "tokio",
 ]
 

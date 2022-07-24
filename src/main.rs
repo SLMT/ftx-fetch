@@ -1,7 +1,6 @@
 use chrono::prelude::*;
 use clap::{Parser, Subcommand};
 use csv::Writer;
-use dotenv::dotenv;
 use ftx::{
     options::Options,
     rest::{Candle, GetFutures, GetHistoricalPrices, Rest},
@@ -64,9 +63,6 @@ type FfResult<T> = Result<T, FfError>;
 
 #[tokio::main]
 async fn main() {
-    // Read '.env' file
-    dotenv().ok();
-
     // Init logging
     set_logger_level();
     pretty_env_logger::init();
@@ -75,7 +71,12 @@ async fn main() {
     let args = Args::parse();
 
     // Create a FTX connector
-    let ftx = Ftx::new(Options::from_env());
+    let ftx = Ftx::new(Options {
+        endpoint: ftx::options::Endpoint::Com,
+        key: None,
+        secret: None,
+        subaccount: None,
+    });
 
     if let Err(error) = match args.command {
         Commands::Tops { count } => tops(ftx, count).await,

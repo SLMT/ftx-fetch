@@ -1,9 +1,11 @@
+use std::fs::File;
+
 use chrono::prelude::*;
 use clap::{Parser, Subcommand};
 use csv::Writer;
 use ftx::{
     options::Options,
-    rest::{Candle, GetFutures, GetHistoricalPrices, Rest},
+    rest::{Candle, GetFutures, GetHistoricalPrices, GetMarket, Rest},
 };
 use log::{error, info};
 use prettytable::{cell, row, Table};
@@ -57,6 +59,10 @@ enum FfError {
     Csv(#[from] csv::Error),
     #[error("Chrono parsing error: {0}")]
     ChronoParse(#[from] chrono::format::ParseError),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 type FfResult<T> = Result<T, FfError>;
@@ -214,23 +220,36 @@ async fn download(
     // Sort the candles by time
     all_candles.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
 
-    // Save the results to a CSV file
+    // Construct the file name
     let real_start_time = all_candles
         .first()
         .unwrap()
         .start_time
         .with_timezone(&Local);
     let real_end_time = all_candles.last().unwrap().start_time.with_timezone(&Local);
-    let filename = format!(
-        "{}-{}-{}.csv",
+    let main_filename = format!(
+        "{}-{}-{}",
         market_name.to_lowercase(),
         real_start_time.format("%Y-%m-%d"),
         real_end_time.format("%Y-%m-%d")
     );
-    info!("Saving the data to '{}'...", filename);
-    save_to_csv(all_candles, &filename)?;
 
-    info!("The data are saved to '{}'.", filename);
+    // Save the results to a CSV file
+    let csv_filename = format!("{}.csv", main_filename);
+    info!("Saving the data to '{}'...", csv_filename);
+    save_to_csv(all_candles, &csv_filename)?;
+
+    // Save the market info to a JSON file
+    let market_info = ftx.request(GetMarket { market_name }).await?;
+    let info_filename = format!("{}-info.json", main_filename);
+    info!("Saving the metadata to '{}'...", info_filename);
+    let mut file = File::create(&info_filename)?;
+    serde_json::to_writer_pretty(&mut file, &market_info)?;
+
+    info!(
+        "The data and the market info are saved to '{}' and '{}', respectively.",
+        csv_filename, info_filename
+    );
 
     Ok(())
 }

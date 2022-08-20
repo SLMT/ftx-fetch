@@ -9,6 +9,7 @@ use ftx::{
 };
 use log::{error, info};
 use prettytable::{cell, row, Table};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::time::{sleep_until, Instant};
 
@@ -220,6 +221,9 @@ async fn download(
     // Sort the candles by time
     all_candles.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
 
+    // Impute the missing values
+    all_candles = impute_missing_values(all_candles, ChDuration::seconds(resolution as i64));
+
     // Construct the file name
     let real_start_time = all_candles
         .first()
@@ -252,6 +256,37 @@ async fn download(
     );
 
     Ok(())
+}
+
+fn impute_missing_values(candles: Vec<Candle>, time_resolution: ChDuration) -> Vec<Candle> {
+    let mut new_list = vec![];
+    let mut last_start_time = None;
+    for candle in candles {
+        if let Some(last_start_time) = last_start_time {
+            if candle.start_time - last_start_time > time_resolution {
+                let imputed_price = candle.close;
+                info!(
+                    "Found missing values between {} and {}. Fill in with estimated prices: {}.",
+                    last_start_time, candle.start_time, imputed_price
+                );
+                let mut imputed_start_time = last_start_time + time_resolution;
+                while imputed_start_time < candle.start_time {
+                    new_list.push(Candle {
+                        close: imputed_price,
+                        high: imputed_price,
+                        low: imputed_price,
+                        open: imputed_price,
+                        start_time: imputed_start_time,
+                        volume: Decimal::ZERO,
+                    });
+                    imputed_start_time = imputed_start_time + time_resolution;
+                }
+            }
+        }
+        last_start_time = Some(candle.start_time);
+        new_list.push(candle);
+    }
+    new_list
 }
 
 fn save_to_csv(candles: Vec<Candle>, file_name: &str) -> csv::Result<()> {
